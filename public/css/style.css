@@ -6,3 +6,7 @@
 :root{
     --blue-default: #3090db;
 }
+
+body{
+    background: linear-gradient(to right, white, lightblue, #3090db);
+}
