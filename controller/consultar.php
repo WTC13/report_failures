@@ -1,87 +1,108 @@
 <?php
+require_once '../database/database.php'; 
 
-session_start();
-unset($_SESSION['resultados_busca']);
-unset($_SESSION['termo_busca_utilizado']);
-$_SESSION['erro_busca'] = null;
-
-include_once '../database/database.php'; // Usa-se $conn
-
-// Verifica se a requisição é POST
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    
-    // Captura todos os dados, garantindo que mesmo vazios existam
-    $protocolo = trim($_POST['protocolo'] ?? '');
-    $empresa = trim($_POST['empresa'] ?? '');
-    $email = trim($_POST['email'] ?? '');
-    $celular = trim($_POST['celular'] ?? '');
-
-    // 1. Constrói a cláusula WHERE dinamicamente
-    $where = [];
-    $tipos = '';
-    $valores = [];
-    
-    
-    if (!empty($protocolo)) {
-        $where[] = "protocolo = ?";
-        $tipos .= 's';
-        $valores[] = $protocolo;
+function sendJsonResponse($status, $mensagem, $dados = null, $httpCode = 200) {
+    http_response_code($httpCode);
+    $response = ['status' => $status, 'mensagem' => $mensagem];
+    if ($dados !== null) {
+        $response['dados'] = $dados;
     }
-    
-    if (!empty($empresa)) {
-        // Se quiser uma busca parcial, use LIKE: $where[] = "empresa LIKE ?";
-        $where[] = "empresa = ?"; 
-        $tipos .= 's';
-        $valores[] = $empresa;
-    }
-    
-    if (!empty($email)) {
-        $where[] = "email = ?";
-        $tipos .= 's';
-        $valores[] = $email;
-    }
-
-    if(!empty($celular)){
-        $where[] = "celular = ?";
-        $tipos .= 's';
-        $valores[] = $celular;
-    }
-
-    
-    // Verifica se algum campo foi preenchido
-    if (count($where) > 0) {
-        // Junta as condições com 'AND'
-        $sql = "SELECT * FROM reporte WHERE " . implode(' AND ', $where);
-        
-        if ($stmt = $conn->prepare($sql)) {
-            
-            // Liga os parâmetros (usa call_user_func_array pois os parâmetros são variáveis)
-            $bind_params = array_merge([$tipos], $valores);
-            $stmt->bind_param(...$bind_params);
-
-            $stmt->execute();
-            $resultados_query = $stmt->get_result();
-            
-            $_SESSION['resultados_busca'] = $resultados_query->fetch_all(MYSQLI_ASSOC);
-            // Armazena todos os termos para mostrar no reports_dev.php (opcional)
-            $_SESSION['termo_busca_utilizado'] = "Protocolo: $protocolo, Empresa: $empresa, E-mail: $email"; 
-
-            $stmt->close();
-            
-        } else {
-            $_SESSION['erro_busca'] = "Erro na preparação da consulta: " . $conn->error;
-        }
-        
-    } else {
-        $_SESSION['erro_busca'] = "Preencha pelo menos um campo para realizar a busca.";
-    }
-    
-} else {
-    $_SESSION['erro_busca'] = "Acesso inválido ou formulário não enviado (método incorreto).";
+    echo json_encode($response);
+    exit;
 }
 
-$conn->close();
+header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Methods: POST");
+header("Access-Control-Allow-Headers: Content-Type");
+header('Content-Type: application/json');
 
-header('Location: ../views/reports_dev.php');
-exit;
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    sendJsonResponse('ERRO', 'Método não permitido.', null, 405);
+}
+
+$json_data = file_get_contents('php://input');
+$dados_recebidos = json_decode($json_data, true);
+
+if ($dados_recebidos === null) {
+    sendJsonResponse('ERRO', 'Dados JSON inválidos.', null, 400);
+}
+
+$protocolo = $dados_recebidos['protocolo'] ?? '';
+$empresa   = $dados_recebidos['empresa'] ?? '';
+$email     = $dados_recebidos['email'] ?? '';
+$celular   = $dados_recebidos['celular'] ?? '';
+
+$clausulas = [];
+$tipos = '';
+$parametros = [];
+
+if (!empty($protocolo)) {
+    $clausulas[] = 'protocolo = ?'; 
+    $tipos .= 's'; 
+    $parametros[] = $protocolo;
+}
+if (!empty($empresa)) {
+    $clausulas[] = 'empresa LIKE ?';
+    $tipos .= 's';
+    $parametros[] = "%$empresa%"; 
+}
+if (!empty($email)) {
+    $clausulas[] = 'email = ?';
+    $tipos .= 's';
+    $parametros[] = $email;
+}
+if (!empty($celular)) {
+    $clausulas[] = 'celular = ?';
+    $tipos .= 's';
+    $parametros[] = $celular;
+}
+
+if (empty($clausulas)) {
+    sendJsonResponse('ERRO', 'Preencha pelo menos um campo de busca.', null, 400); 
+}
+
+$sql = "SELECT * FROM reporte";
+$sql .= " WHERE " . implode(" OR ", $clausulas); 
+
+try {
+    $mysqli = getConnection();
+    $stmt = $mysqli->prepare($sql);
+    
+    if (!$stmt) {
+        sendJsonResponse('ERRO', 'Erro na preparação da consulta.', null, 500);
+    }
+    
+    $args = [];
+    $args[] = $tipos;
+
+    foreach ($parametros as $key => $valor) {
+        $args[] = &$parametros[$key]; 
+    }
+
+    if (!empty($parametros)) {
+        $bind_result = $stmt->bind_param(...$args); 
+    
+        if ($bind_result === false) {
+            // Erro no bind_param (pode ser problema na query ou nos tipos)
+            sendJsonResponse('ERRO', 'Erro ao vincular parâmetros da consulta.', null, 500);
+        }
+    }
+    
+    $stmt->execute();    
+    $result = $stmt->get_result();
+    $resultados = $result->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    $mysqli->close();
+
+    if (count($resultados) > 0) {
+        sendJsonResponse('SUCESSO', 'Busca realizada com sucesso.', $resultados);
+    } else {
+        sendJsonResponse('ERRO', 'Nenhum reporte encontrado com os critérios fornecidos.', []);
+    }
+
+} 
+catch (Exception $e) {
+    error_log("Erro na consulta: " . $e->getMessage());
+    sendJsonResponse('ERRO', 'Erro interno do servidor ao consultar o banco de dados.', null, 500);
+}
 ?>
